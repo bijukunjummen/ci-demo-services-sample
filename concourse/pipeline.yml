@@ -14,15 +14,26 @@ resources:
     branch: version
     private_key: ((github-private-key))
 
+- name: tools
+  type: git
+  source:
+    uri: ((tools-scripts-url))
+    branch: ((tools-branch))
+
+- name: m2
+  type: docker-image
+  source:
+    repository: springcloud/spring-pipeline-m2
+
 jobs:
 - name: generate-version
   public: true
   plan:
   - aggregate:
+    - get: tools
     - get: version
-    - get: repo
   - task: generate-version
-    file: repo/concourse/tasks/generate-version.yml
+    file: tools/tasks/generate-version/task.yml
     params:
       GIT_EMAIL: ((git-email))
       GIT_NAME: ((git-name))
@@ -35,35 +46,62 @@ jobs:
   public: false
   plan:
   - aggregate:
+    - get: tools
     - get: repo
+    - get: m2
     - get: version
       resource: version
       passed:
       - generate-version
       trigger: true
   - task: build-and-upload
-    file: repo/concourse/tasks/build-and-upload.yml
+    file: tools/tasks/build-and-upload/task.yml
     params:
+      M2_REPO: ((maven-local-dir))
       <<: *common-params
+  - task: create-dev-tag
+    file: tools/tasks/tag-repo/task.yml
+    params:
+      TAG_PREFIX: dev
   - put: repo
     params:
       repository: out
       tag: out/tag
       only_tag: true
 
-- name: test-deploy
+- name: build-api-compatibility-check
   serial: true
   public: false
   plan:
   - aggregate:
+    - get: tools
     - get: repo
+    - get: m2
     - get: version
       resource: version
       passed:
       - build-and-upload
       trigger: true
+  - task: build-api-compatibility-check
+    file: tools/tasks/build-api-compatibility-check/task.yml
+    params:
+      <<: *common-params
+
+- name: test-deploy
+  serial: true
+  public: false
+  plan:
+  - aggregate:
+    - get: tools
+    - get: repo
+    - get: m2
+    - get: version
+      resource: version
+      passed:
+      - build-api-compatibility-check
+      trigger: true
   - task: test-deploy
-    file: repo/concourse/tasks/test-deploy.yml
+    file: tools/tasks/test-deploy/task.yml
     params:
       <<: *common-params
       <<: *paas-test-params
@@ -74,33 +112,74 @@ jobs:
   public: false
   plan:
   - aggregate:
+    - get: tools
     - get: repo
+    - get: m2
     - get: version
       resource: version
       passed:
       - test-deploy
       trigger: true
   - task: test-smoke
-    file: repo/concourse/tasks/test-smoke.yml
+    file: tools/tasks/test-smoke/task.yml
     params:
       <<: *common-params
       <<: *paas-test-params
 
+- name: test-rollback-deploy
+  serial: true
+  public: false
+  plan:
+  - aggregate:
+    - get: tools
+    - get: repo
+    - get: m2
+    - get: version
+      resource: version
+      passed:
+      - test-smoke
+      trigger: true
+  - task: test-rollback-deploy
+    file: tools/tasks/test-rollback-deploy/task.yml
+    params:
+      <<: *common-params
+      <<: *paas-test-params
+      PAAS_HOSTNAME_UUID: ((paas-hostname-uuid))
 
+- name: test-rollback-smoke
+  serial: true
+  public: false
+  plan:
+  - aggregate:
+    - get: tools
+    - get: repo
+    - get: m2
+    - get: version
+      resource: version
+      passed:
+      - test-rollback-deploy
+      trigger: true
+  - task: test-rollback-smoke
+    file: tools/tasks/test-rollback-smoke/task.yml
+    params:
+      <<: *common-params
+      <<: *paas-test-params
 
 - name: stage-deploy
   serial: true
   public: false
   plan:
   - aggregate:
+    - get: tools
     - get: repo
+    - get: m2
     - get: version
       resource: version
       passed:
-      - test-smoke
+      - test-rollback-smoke
       trigger: false
   - task: stage-deploy
-    file: repo/concourse/tasks/stage-deploy.yml
+    file: tools/tasks/stage-deploy/task.yml
     params:
       <<: *common-params
       <<: *paas-stage-params
@@ -111,14 +190,16 @@ jobs:
   public: false
   plan:
   - aggregate:
+    - get: tools
     - get: repo
+    - get: m2
     - get: version
       resource: version
       passed:
       - stage-deploy
       trigger: false
-  - task: stage-smoke
-    file: repo/concourse/tasks/stage-e2e.yml
+  - task: stage-e2e
+    file: tools/tasks/stage-e2e/task.yml
     params:
       <<: *common-params
       <<: *paas-stage-params
@@ -128,18 +209,24 @@ jobs:
   public: false
   plan:
   - aggregate:
+    - get: tools
     - get: repo
+    - get: m2
     - get: version
       resource: version
       passed:
       - stage-e2e
       trigger: false
   - task: prod-deploy
-    file: repo/concourse/tasks/prod-deploy.yml
+    file: tools/tasks/prod-deploy/task.yml
     params:
       <<: *common-params
       <<: *paas-prod-params
       PAAS_HOSTNAME_UUID: ((paas-hostname-uuid))
+  - task: create-prod-tag
+    file: tools/tasks/tag-repo/task.yml
+    params:
+      TAG_PREFIX: prod
   - put: repo
     params:
       repository: out
@@ -151,14 +238,16 @@ jobs:
   public: false
   plan:
   - aggregate:
+    - get: tools
     - get: repo
+    - get: m2
     - get: version
       resource: version
       passed:
       - prod-deploy
       trigger: false
   - task: prod-complete
-    file: repo/concourse/tasks/prod-complete.yml
+    file: tools/tasks/prod-complete/task.yml
     params:
       <<: *common-params
       <<: *paas-prod-params
@@ -174,7 +263,7 @@ common-params: &common-params
   M2_SETTINGS_REPO_USERNAME: ((m2-settings-repo-username))
   PAAS_TYPE: ((paas-type))
   REPO_WITH_BINARIES: ((repo-with-binaries))
-  PROJECT_TYPE: ((project-type))
+  # PROJECT_TYPE: ((project-type))
 
 paas-prod-params: &paas-prod-params
   PAAS_PROD_API_URL: ((paas-prod-api-url))
